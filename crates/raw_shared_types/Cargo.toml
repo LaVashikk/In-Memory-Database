@@ -1,0 +1,10 @@
+[package]
+name = "raw_shared_types"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

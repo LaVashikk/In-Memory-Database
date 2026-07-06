@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/raw_shared_types",
+    "crates/server",
+    "crates/smart_client"
+]
+default-members = ["crates/server"]
+
+[workspace.package]
+edition = "2024"
+version = "1.0.0"
+
+[workspace.lints.rust] # For exploratory dev only.
+unused = { level = "allow", priority = -1 }
+dead_code = { level = "allow", priority = -1 }
+
+[workspace.dependencies]
+log = "0.4"
+anyhow = "1.0"
+tokio       = { version = "1", features = ["full"] }
+libc        = "0.2"
+raw_shared_types = { path = "crates/raw_shared_types" }
