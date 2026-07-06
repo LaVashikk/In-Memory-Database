@@ -22,7 +22,7 @@ pub fn checksum(b: &[u8]) -> u64 {
 
 // Body: [len](wire-body | [lsn][op][k-len][key][value])[checksum]
 // size: (8 + 4 + '1' + 4 + key + value + 8) - todo 'bad padding' probably
-pub fn encode_put(out: &mut Vec<u8>, lsn: u64, wire_bytes_blob: &[u8]) { // TODO
+pub fn encode_put(out: &mut Vec<u8>, lsn: u64, wire_bytes_blob: &[u8]) {
     let body_len = 8 + wire_bytes_blob.len(); // lsn + body lenght
     out.extend_from_slice(&(body_len as u32).to_le_bytes()); // todo: u32 or u64?
     let body_start = out.len() + 4;
@@ -39,7 +39,24 @@ pub fn encode_put(out: &mut Vec<u8>, lsn: u64, wire_bytes_blob: &[u8]) { // TODO
 
 // list wal segments sorted by start_lsn
 pub fn list_segments(dir: &Path) -> std::io::Result<Vec<(u64, PathBuf)>> {
-    Ok(vec![]) // todo
+    let mut v = Vec::new();
+    if !dir.exists() {
+        return Ok(v);
+    }
+
+    for e in fs::read_dir(dir)? {
+        let e = e?;
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if let Some(num) = name.strip_prefix(SEG_PREFIX) {
+            if let Ok(start) = num.parse::<u64>() {
+                v.push((start, e.path()));
+            }
+        }
+    }
+
+    v.sort_by_key(|(s, _)| *s);
+    Ok(v)
 }
 
 pub fn segment_path(dir: &Path, start_lsn: u64) -> PathBuf {
