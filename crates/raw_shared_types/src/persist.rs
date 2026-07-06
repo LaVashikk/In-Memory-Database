@@ -96,13 +96,41 @@ pub fn write_snapshot(db: &Db, dir: &Path, lsn: u64) -> std::io::Result<()> {
     Ok(())
 }
 
-fn load_snapshot(bytes: &[u8], _db: &mut Db) -> Option<u64> {
+fn load_snapshot(bytes: &[u8], db: &mut Db) -> Option<u64> {
     if bytes.len() < 20 || rd_u32(&bytes[0..4]) as u32 != SNAP_MAGIC {
+        eprintln!("Snapshot file is invalid!");
         return None;
     }
 
-    // TODO
-    None
+    let lsn = rd_u64(&bytes[4..12]);
+    let db_len = rd_u64(&bytes[12..20]);
+    let mut p: usize = 20; // POINTER
+
+    // Now reading key-value pairs
+    for _ in 0..(db_len as usize) {
+        if p + 4 > bytes.len() {
+            break;
+        }
+
+        let key_len = rd_u32(&bytes[p..p+4]);
+        p += 4;
+        let key = &bytes[p..p + key_len];
+        p += key_len;
+
+        let val_len = rd_u32(&bytes[p..p+4]);
+        p += 4;
+        let val = &bytes[p..p + val_len];
+        p += key_len;
+
+        db.insert_raw(key, val);
+
+        // let key_len = rd_u32(&bytes[p..p + 4]);
+        // let key = &bytes[p+4 .. p+4+key_len];
+        // let val_len = rd_u32(&bytes[p+4+key_len .. p+4+key_len+4]);
+        // let val = &bytes[p+4+key_len+4 .. p+4+key_len+4+val_len];
+    }
+
+    Some(lsn)
 }
 
 const WAL_LEN_SIZE: usize = 4;
