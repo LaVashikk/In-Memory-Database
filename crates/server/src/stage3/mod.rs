@@ -85,8 +85,24 @@ impl Segment {
 }
 
 // remove old wal segments fully covered by durable snapshot
-fn compact(dir: &std::path::Path, durable_lsn: u64, active_start: u64) {
-    // todo
+fn compact(dir: &std::path::Path, durable_lsn: u64, active_start: u64) { // todo: temp impl
+    let segs = match persist::list_segments(dir) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    for i in 0..segs.len() {
+        let (start, ref path) = segs[i];
+        if start == active_start {
+            continue;
+        }
+
+        // if next seg start is <= durable_lsn + 1, current seg is fully in snapshot
+        let next_start = segs.get(i + 1).map(|(s, _)| *s).unwrap_or(u64::MAX);
+        if next_start <= durable_lsn + 1 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn wal_write_all(ring: &mut IoUring, fd: i32, buf: &[u8], mut off: u64) -> std::io::Result<()> {
