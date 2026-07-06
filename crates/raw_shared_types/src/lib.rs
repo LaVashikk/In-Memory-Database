@@ -14,11 +14,43 @@ pub const OP_GET: u8 = 0;
 pub const OP_PUT: u8 = 1;
 // pub const OP_REM: u8 = 2; // todo
 
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum Operation {
+    Get = OP_GET,
+    Put = OP_PUT,
+    // todo
+}
+
+// raw method for encoding request to wire-protocol
+pub fn encode(op: Operation, key: &[u8], value: Option<&[u8]>) -> Option<Vec<u8>> {
+    // op + klen + key + value
+    let body_len = 1 + 4 + key.len() + value.map(|v| v.len()).unwrap_or(0);
+    let mut buf = Vec::<u8>::with_capacity(4 + body_len);
+
+    // WIRE-PROTO: [len] + [op][klen:u32][key][val]
+    buf.extend_from_slice(&(body_len as u32).to_le_bytes());
+
+    buf.push(op as u8);
+    buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
+    buf.extend_from_slice(key);
+
+    if let Some(value) = value {
+        buf.extend_from_slice(value);
+    } else if matches!(op, Operation::Put) {
+        return None
+    }
+
+    Some(buf)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resp {
-    Value(Arc<[u8]>),
+    Value(Arc<[u8]>), // todo: heavy shit, buuuuuuuuut uuuuuuuuugh ok?
     Ok,
     Miss,
     UnknownOp,
+    Unknown,
 }
 
 impl Resp {
@@ -29,6 +61,17 @@ impl Resp {
             Resp::Ok => 1,
             Resp::Miss => 2,
             Resp::UnknownOp => 3,
+            _ => 4,
+        }
+    }
+
+    pub fn from_proto_code(body: &[u8]) -> Self {
+        match body.first().copied() {
+            Some(0) => Resp::Value(body[1..].into()),
+            Some(1) => Resp::Ok,
+            Some(2) => Resp::Miss,
+            Some(3) => Resp::UnknownOp,
+            _ => Resp::Unknown,
         }
     }
 }
