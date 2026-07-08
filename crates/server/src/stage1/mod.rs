@@ -49,9 +49,9 @@ pub async fn handle_conn(sock: tokio::net::TcpStream, item_tx: async_mpsc::Sende
     tokio::spawn(async move {
         let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
         while let Some(first) = resp_rx.recv().await {
-            encode(&mut buf, &first);
+            encode_resp(&mut buf, &first);
             while let Ok(r) = resp_rx.try_recv() {
-                encode(&mut buf, &r);
+                encode_resp(&mut buf, &r);
                 if buf.len() >= 256 * 1024 {
                     break;
                 }
@@ -89,7 +89,7 @@ pub async fn handle_conn(sock: tokio::net::TcpStream, item_tx: async_mpsc::Sende
 }
 
 #[inline]
-fn encode(buf: &mut Vec<u8>, r: &Resp) {
+fn encode_resp(buf: &mut Vec<u8>, r: &Resp) {
     match r {
         Resp::Value(v) => {
             buf.extend_from_slice(&((1 + v.len()) as u32).to_le_bytes());
@@ -101,5 +101,7 @@ fn encode(buf: &mut Vec<u8>, r: &Resp) {
             buf.extend_from_slice(&1u32.to_le_bytes());
             buf.push(r.to_proto_code());
         }
+
+        Resp::Unknown => unreachable!()
     }
 }
