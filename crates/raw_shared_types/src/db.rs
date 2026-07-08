@@ -28,6 +28,16 @@ impl Db {
         self.map.insert(k.into(), Arc::from(v));
     }
 
+    #[inline]
+    pub fn remove_raw(&mut self, k: &[u8]) -> Option<Arc<[u8]>> {
+        self.map.remove(k)
+    }
+
+    #[inline]
+    pub fn remove_entry(&mut self, k: &[u8]) -> Option<(Box<[u8]>, Arc<[u8]>)> {
+        self.map.remove_entry(k)
+    }
+
     // #[inline]
     // pub fn get(&mut self, k: &[u8]) {
     // }

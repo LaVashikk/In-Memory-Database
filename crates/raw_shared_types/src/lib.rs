@@ -23,10 +23,15 @@ pub enum Operation {
 }
 
 // raw method for encoding request to wire-protocol
-pub fn encode(op: Operation, key: &[u8], value: Option<&[u8]>) -> Option<Vec<u8>> {
+pub fn encode_raw(buf: &mut Vec<u8>, op: Operation, key: &[u8], value: Option<&[u8]>) -> usize {
+    let len_before = buf.len();
+
+    if matches!(op, Operation::Put) && value.is_none() {
+        return 0;
+    }
+
     // op + klen + key + value
     let body_len = 1 + 4 + key.len() + value.map(|v| v.len()).unwrap_or(0);
-    let mut buf = Vec::<u8>::with_capacity(4 + body_len);
 
     // WIRE-PROTO: [len] + [op][klen:u32][key][val]
     buf.extend_from_slice(&(body_len as u32).to_le_bytes());
@@ -37,11 +42,20 @@ pub fn encode(op: Operation, key: &[u8], value: Option<&[u8]>) -> Option<Vec<u8>
 
     if let Some(value) = value {
         buf.extend_from_slice(value);
-    } else if matches!(op, Operation::Put) {
-        return None
     }
 
-    Some(buf)
+    buf.len() - len_before
+}
+
+pub fn encode(op: Operation, key: &[u8], value: Option<&[u8]>) -> Option<Vec<u8>> {
+    let body_len = 1 + 4 + key.len() + value.map(|v| v.len()).unwrap_or(0);
+    let mut buf = Vec::<u8>::with_capacity(4 + body_len);
+
+    if encode_raw(&mut buf, op, key, value) != 0 {
+        Some(buf)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
