@@ -3,7 +3,16 @@ name = "smart_client"
 edition.workspace = true
 version.workspace = true
 
+[features]
+default = ["tokio"]
+# Enables AsyncClient::new() convenience constructor that spawns tokio tasks
+tokio = ["dep:tokio"]
+
 [dependencies]
+raw_shared_types.workspace = true
+anyhow.workspace = true
+
+tokio = { workspace = true, optional = true }
 
 [lints]
 workspace = true
