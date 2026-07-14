@@ -145,12 +145,11 @@ pub fn recover(dir: &Path) -> std::io::Result<(Db, u64)> {
     let mut highest = 0u64;
 
     let snap = dir.join("snapshot");
-    if snap.exists() {
-        if let Some(l) = load_snapshot(&fs::read(&snap)?, &mut db) {
+    if snap.exists()
+        && let Some(l) = load_snapshot(&fs::read(&snap)?, &mut db) {
             snap_lsn = l;
             highest = l;
         }
-    }
 
     let mut replayed = 0u64;
     let mut torn = false;

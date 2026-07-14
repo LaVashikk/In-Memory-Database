@@ -133,6 +133,7 @@ impl Request {
 pub struct Batch {
     pub items: Vec<Request>,
     pub out: Vec<u8>,   // wal redo buffer (lsn stamped put records)
+    pub lsn_low: u64,   // lowest  lsn assigned in this batch
     pub lsn_hi: u64,    // highest lsn assigned in this batch
 }
 
@@ -141,6 +142,7 @@ impl Batch {
         Self {
             items: Vec::with_capacity(items),
             out: Vec::with_capacity(out),
+            lsn_low: 0,
             lsn_hi: 0,
         }
     }
@@ -149,6 +151,7 @@ impl Batch {
     pub fn recycle(&mut self) {
         self.items.clear();
         self.out.clear();
+        self.lsn_low = 0;
         self.lsn_hi = 0;
     }
 }

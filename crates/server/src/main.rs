@@ -21,6 +21,7 @@ const COMPACT_EVERY_LSN: u64 = 2_000_000;
 // rotate wal file after this many bytes
 const SEG_BYTES: u64 = 256 * 1024 * 1024;
 
+pub const RING_DEPTH: u32 = 128;
 pub const MAX_BATCH: usize = 1024;
 pub const N_BUFFERS: usize = 8;
 pub const OUT_CAP: usize = 256 * 1024;

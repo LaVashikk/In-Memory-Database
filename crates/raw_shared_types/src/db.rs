@@ -49,7 +49,9 @@ impl Db {
 
     // apply batch in place. lsn is 1-based monotonic counter
     pub fn apply(&mut self, batch: &mut Batch, lsn: &mut u64) {
-        let Batch { items, out, lsn_hi } = batch;
+        let Batch { items, out, lsn_low, lsn_hi } = batch;
+        *lsn_low = *lsn;
+
         for req in items.iter_mut() {
             match req.op() {
                 // 'GET' - just return the value if we have it
@@ -65,13 +67,12 @@ impl Db {
                     let klen = req.klen();
                     let key = &req.data[5..5 + klen];
                     let val = &req.data[5 + klen..];
-                    let id = *lsn;
                     *lsn += 1;
-                    *lsn_hi = id; // lsn_hi is the last 'changing' lsn
+                    // *lsn_hi = *lsn; // lsn_hi is the last 'changing' lsn
                     match self.map.get_mut(key) {
                         Some(slot) => {
                             if slot.len() == val.len() && let Some(buf) = Arc::get_mut(slot) {
-                                buf.copy_from_slice(val);
+                                buf.copy_from_slice(val); // todo: safety?
                             }
                         },
                         None => { self.map.insert(key.into(), Arc::from(val)); } ,
@@ -84,6 +85,8 @@ impl Db {
 
                 _ => req.resp = Some(Resp::UnknownOp),
             }
+
+            *lsn_hi = *lsn; // why i just cannot do that?
         }
     }
 }
