@@ -3,6 +3,7 @@
 //
 // recovery: load snap -> replay wal records greater than snap_lsn
 
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -151,6 +152,20 @@ impl Batch {
         self.lsn_hi = 0;
     }
 }
+
+impl Deref for Batch {
+    type Target = Vec<Request>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+impl DerefMut for Batch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.items
+    }
+}
+
 
 pub mod db;
 pub use db::Db;
