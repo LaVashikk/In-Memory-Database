@@ -105,7 +105,7 @@ pub fn rd_u64(b: &[u8]) -> u64 {
 // one ready for handling request from client!
 pub struct Request {
     // todo: hmmmm maybe use BOX?
-    pub data: Vec<u8>, // [op][klen:u32][key][val]
+    pub data: bytes::Bytes, // [op][klen:u32][key][val]
     pub reply: Sender<Resp>,
     pub resp: Option<Resp>,
 }
@@ -134,6 +134,7 @@ pub struct Batch {
     pub out: Vec<u8>,   // wal redo buffer (lsn stamped put records)
     pub lsn_hi: u64,    // highest lsn assigned in this batch
 }
+
 impl Batch {
     pub fn with_capacity(items: usize, out: usize) -> Self {
         Self {

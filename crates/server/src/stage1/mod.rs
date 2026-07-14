@@ -1,5 +1,6 @@
 use std::time::Duration;
 use anyhow::Context;
+use bytes::BytesMut;
 use raw_shared_types::{Request, Resp};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -44,6 +45,8 @@ pub async fn handle_conn(sock: tokio::net::TcpStream, item_tx: async_mpsc::Sende
     let (rd, mut wr) = sock.into_split();
     let mut reader = BufReader::with_capacity(64 * 1024, rd);
     let (resp_tx, mut resp_rx) = async_mpsc::channel::<Resp>(RESP_BOUND);
+    let mut payload_buf = BytesMut::with_capacity(1024 * 32);
+    let mut len_buf = [0u8; 4];
 
     // WRITER
     tokio::spawn(async move {
@@ -64,24 +67,28 @@ pub async fn handle_conn(sock: tokio::net::TcpStream, item_tx: async_mpsc::Sende
     });
 
     // READER
-    let mut len_buf = [0u8; 4];
     loop {
         if reader.read_exact(&mut len_buf).await.is_err() {
             break;
         }
+
         let len = u32::from_le_bytes(len_buf) as usize;
         if len == 0 || len > 8 * 1024 * 1024 {
             break;
         }
-        let mut data = vec![0u8; len]; // todo: yeah alloc here, I see, I know... And idk how to fix it now... maybe BytesMut
-        if reader.read_exact(&mut data).await.is_err() {
+
+        payload_buf.resize(len, 0);
+        if reader.read_exact(&mut payload_buf[..]).await.is_err() {
             break;
         }
+
+        let data = payload_buf.split_to(len).freeze();
         let req = Request {
             data,
             reply: resp_tx.clone(),
             resp: None,
         };
+
         if item_tx.send(req).await.is_err() {
             break;
         }
