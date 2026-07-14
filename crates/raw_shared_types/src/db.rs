@@ -5,7 +5,7 @@ use crate::{Batch, OP_GET, OP_PUT, Resp, persist};
 #[derive(Default)]
 pub struct Db {
     // todo: this is a random pointers... maybe use something like arena idduno
-    map: HashMap<Box<[u8]>, Arc<[u8]>>, // TODO: hashmap is not a perfect solution... SipHash is slow
+    map: HashMap<Box<[u8]>, Arc<[u8]>, ahash::RandomState>,
     //but it's for this POC pretty fine
     // more todo:"Adaptive Radix Tree (ART) or maybe Concurrent B-Tree / SkipList"
 }
@@ -13,7 +13,7 @@ pub struct Db {
 impl Db {
     pub fn new() -> Self {
         Self {
-            map: HashMap::with_capacity(1 << 20),  // todo: this also need some capacity, what if it ended?
+            map: HashMap::with_capacity_and_hasher(1 << 20, ahash::RandomState::new()),  // todo: this also need some capacity, what if it ended?
         }
     }
 
