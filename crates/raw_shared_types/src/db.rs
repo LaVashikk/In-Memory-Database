@@ -68,8 +68,15 @@ impl Db {
                     let id = *lsn;
                     *lsn += 1;
                     *lsn_hi = id; // lsn_hi is the last 'changing' lsn
-                    persist::encode_put(out, id, &req.data); // format redo byte stream.
-                    self.map.insert(key.into(), Arc::from(val));
+                    match self.map.get_mut(key) {
+                        Some(slot) => {
+                            if slot.len() == val.len() && let Some(buf) = Arc::get_mut(slot) {
+                                buf.copy_from_slice(val);
+                            }
+                        },
+                        None => { self.map.insert(key.into(), Arc::from(val)); } ,
+                    };
+
                     req.resp = Some(Resp::Ok);
                 }
 
