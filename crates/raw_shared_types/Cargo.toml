@@ -5,6 +5,16 @@ version.workspace = true
 
 [dependencies]
 tokio.workspace = true
+ahash = "0.8.12"
+bytes = "1.12.1"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3"
+
+[[bench]]
+name = "db"
+harness = false

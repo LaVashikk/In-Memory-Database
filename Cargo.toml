@@ -21,3 +21,10 @@ anyhow = "1.0"
 tokio       = { version = "1", features = ["full"] }
 libc        = "0.2"
 raw_shared_types = { path = "crates/raw_shared_types" }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"
+debug = "line-tables-only"
