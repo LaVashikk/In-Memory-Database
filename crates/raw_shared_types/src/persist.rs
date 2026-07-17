@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const SEG_PREFIX: &str = "wal.";
-const SNAP_MAGIC: u32 = u32::from_le_bytes(*b"POC1");
+pub const SNAPSHOT_MAGIC: u32 = u32::from_le_bytes(*b"POC1");
 
 
 // fnv1a 64bit checksum. fast enough atm
@@ -63,41 +63,8 @@ pub fn segment_path(dir: &Path, start_lsn: u64) -> PathBuf {
     dir.join(format!("{SEG_PREFIX}{start_lsn:020}"))
 }
 
-// crash-safe snapshot: write tmp -> fdatasync -> atomic rename -> sync parent dir
-// FORMAT: "[magic][start-lsn][len] | ( [k-len][key][v-len][val] )+"
-// TODO: use COW-child
-pub fn write_snapshot(db: &Db, dir: &Path, lsn: u64) -> std::io::Result<()> {
-    let tmp = dir.join("snapshot.tmp");
-    {
-        let f = fs::File::create(&tmp)?;
-        let mut w = std::io::BufWriter::new(f);
-
-        // file start
-        w.write_all(&SNAP_MAGIC.to_le_bytes())?;
-        w.write_all(&lsn.to_le_bytes())?;
-        w.write_all(&(db.len() as u64).to_le_bytes())?;
-
-        // Serealization
-        for (k, v) in db.iter() {
-            w.write_all(&(k.len() as u32).to_le_bytes())?;
-            w.write_all(k)?;
-            w.write_all(&(v.len() as u32).to_le_bytes())?;
-            w.write_all(v)?;
-        }
-
-        w.flush()?;
-        w.get_ref().sync_data()?;
-    }
-
-    fs::rename(&tmp, dir.join("snapshot"))?; // atomic rename
-    if let Ok(d) = fs::File::open(dir) {
-        let _ = d.sync_all(); // fsync dir so rename survives crash
-    }
-    Ok(())
-}
-
 fn load_snapshot(bytes: &[u8], db: &mut Db) -> Option<u64> {
-    if bytes.len() < 20 || rd_u32(&bytes[0..4]) as u32 != SNAP_MAGIC {
+    if bytes.len() < 20 || rd_u32(&bytes[0..4]) as u32 != SNAPSHOT_MAGIC {
         eprintln!("Snapshot file is invalid!");
         return None;
     }
@@ -124,6 +91,7 @@ fn load_snapshot(bytes: &[u8], db: &mut Db) -> Option<u64> {
 
         db.insert_raw(key, val);
 
+        // OUTDATED CODE:
         // let key_len = rd_u32(&bytes[p..p + 4]);
         // let key = &bytes[p+4 .. p+4+key_len];
         // let val_len = rd_u32(&bytes[p+4+key_len .. p+4+key_len+4]);

@@ -17,9 +17,11 @@ mod alloc_stat;
 static GLOBAL: alloc_stat::Counting = alloc_stat::Counting;
 
 // trigger snapshot & wal compaction every N puts
-const COMPACT_EVERY_LSN: u64 = 2_000_000;
+pub const SNAPSHOT_EVERY_LSN: u64 = 2_000_000;
+pub const SNAPSHOT_MIN_LSN_GAP: u64 = 500_000;
 // rotate wal file after this many bytes
 const SEG_BYTES: u64 = 256 * 1024 * 1024;
+
 
 pub const RING_DEPTH: u32 = 128;
 pub const MAX_BATCH: usize = 1024;
@@ -30,15 +32,18 @@ pub const RESP_BOUND: usize = 8_192;
 
 mod args;
 use args::*;
+
 mod stage1; // todo: make better naming
 mod stage2;
 mod stage3;
 
-// TODO: move to shared_types?
-// control msg stage 2 -> stage 3
-pub enum Ctrl { // todo
-    // snapshot durable up to this LSN, safe to delete old wal files
-    Compact(u64),
+pub enum WalMsg {
+    Write(Batch),
+    /// Start a fresh segment named `boundary_lsn`.
+    Rotate { boundary_lsn: u64 },
+    /// Unlink every segment whose start_lsn < `boundary_lsn`.
+    /// The active segment starts at >= boundary_lsn by construction.
+    Retire { boundary_lsn: u64 },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -50,9 +55,8 @@ fn main() -> anyhow::Result<()> {
     // pipeline channels
     // TODO: make better naming here
     let (item_tx, item_rx) = async_mpsc::channel::<Request>(REQ_BOUND);
-    let (s23_tx, s23_rx) = sync_mpsc::channel::<Batch>();
+    let (s23_tx, s23_rx) = sync_mpsc::channel::<WalMsg>();
     let (pool_tx, pool_rx) = sync_mpsc::channel::<Batch>();
-    let (ctrl_tx, ctrl_rx) = sync_mpsc::channel::<Ctrl>(); // todo fucking bullshit probably, i dont like it!
 
     // spawning buffers-pool
     for _ in 0..N_BUFFERS {
@@ -84,14 +88,14 @@ fn main() -> anyhow::Result<()> {
         let ring = IoUring::new(64).expect("io_uring_setup");
         thread::Builder::new()
             .name("stage3".into())
-            .spawn(move || stage3::run_io_worker(s23_rx, pool_tx, ctrl_rx, ring, args.mode, dir, start_lsn))
+            .spawn(move || stage3::run_io_worker(s23_rx, pool_tx, ring, args.mode, dir, start_lsn))
             .context("failed to spawn stage-3")?;
     }
 
     eprintln!("server starting: port={} mode={:?} dir={:?} start_lsn={}", args.port, args.mode, args.dir, start_lsn);
 
     // main thread is the 'stage 2' - main DB-worker!
-    stage2::run_main_loop(item_rx, pool_rx, s23_tx, ctrl_tx, db, start_lsn, args.mode, args.dir);
+    stage2::run_main_loop(item_rx, pool_rx, s23_tx, db, start_lsn, args.mode, args.dir);
 
     unreachable!()
 }

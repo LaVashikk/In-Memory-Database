@@ -8,7 +8,7 @@ use io_uring::{IoUring, opcode, squeue, types};
 use raw_shared_types::{Batch, OP_PUT, persist};
 use slab::Slab;
 
-use crate::{Ctrl, SEG_BYTES};
+use crate::{SEG_BYTES, WalMsg};
 use crate::args::Mode;
 
 // todo: too heavy?
@@ -28,9 +28,9 @@ pub struct WriteOp {
 pub enum IoWork {
     Write(WriteOp),
     Fsync,
-    Remove(CString),
+    Remove(PathBuf),
     // Rotation, // todo
-    // Compact, // todo
+    // Retire, // todo
 }
 
 impl IoWork {
@@ -62,6 +62,7 @@ impl IoWork {
             },
 
             IoWork::Remove(path) => {
+                // PathBuf to CSting
                 todo!()
             },
 
@@ -105,7 +106,7 @@ const IO_WAIT_NS: u32 = 500_000;
 
 pub struct WalEngine {
     dir: PathBuf,
-    lsn: u64,
+    last_ingested_lsn: u64,
     ring: IoUring,
     seg: Segment,
     mode: Mode,
@@ -113,7 +114,7 @@ pub struct WalEngine {
     inflight: Slab<IoWork>,
     spin_budget: i32,
 
-    batch_rx: sync_mpsc::Receiver<Batch>,
+    msg_rx: sync_mpsc::Receiver<WalMsg>,
     recycle_tx: sync_mpsc::Sender<Batch>,
 }
 
@@ -123,7 +124,7 @@ impl WalEngine {
         dir: PathBuf,
         start_lsn: u64,
         mode: Mode,
-        batch_rx: sync_mpsc::Receiver<Batch>,
+        batch_rx: sync_mpsc::Receiver<WalMsg>,
         recycle_tx: sync_mpsc::Sender<Batch>,
     ) -> anyhow::Result<Self> {
         let ring = IoUring::new(ring_depth as u32)?;
@@ -132,7 +133,7 @@ impl WalEngine {
         Ok(
             Self {
                 dir,
-                lsn: start_lsn,
+                last_ingested_lsn: start_lsn,
                 ring,
                 seg,
                 mode,
@@ -140,7 +141,7 @@ impl WalEngine {
                 inflight: Slab::with_capacity(ring_depth),
                 spin_budget: DEFAULT_SPIN_BUDGET,
 
-                batch_rx,
+                msg_rx: batch_rx,
                 recycle_tx,
             }
         )
@@ -153,7 +154,7 @@ impl WalEngine {
         self.pending.is_empty() && self.inflight.is_empty()
     }
     fn ring_is_full(&self) -> bool {
-        self.inflight.len() == self.inflight.capacity()
+        self.inflight.len() == self.inflight.capacity() // todo: Can I access the capacity and call realloc?? maybe use depth value?
     }
 
 
@@ -161,56 +162,38 @@ impl WalEngine {
     // add work. However, if there are very few requests, spinning makes no sense, so we park and wait for data from the ring-cq.
     fn start(mut self) {
         loop {
-            let batch = self.poll_channel_or_park();
+            if let Some(msg) = self.poll_channel_or_park() {
+                match msg {
+                    WalMsg::Write(batch) => self.handle_batch(batch),
+                    WalMsg::Rotate { boundary_lsn } => self.rotate(boundary_lsn),
+                    WalMsg::Retire { boundary_lsn } => self.retire(boundary_lsn),
+                }
+                // update spin-budget
+                self.spin_budget = DEFAULT_SPIN_BUDGET;
+            }
 
             // todo: answers in processing_cqes - but if it's a full GET BATCH - there will be no answers at all!
             // HOWEVER, I'm thinking about dropping GET answers immediately in stage 2, without even moving them to stage 3!! seems like a solid idea.
             // todo 2: okay, but if the batch is empty without 'out' - it simply won't return to the pool - and it will die!!
 
-            // POLNAYA ZALUPA EBANAYA. TODO REMOVE THIS PEACE OF SHIT (c) me
-            if let Some(data) = batch && !data.out.is_empty() {
-                // todo: update self.LSN
-                if data.lsn_hi > self.lsn {
-                    self.lsn = data.lsn_hi;
-                } else {
-                    // PIZDEC WHAT THE FUCK?
-                }
-
-                // todo: rotate file size limit [bruh]
-                if self.seg.offset >= SEG_BYTES {
-                    self.seg = Segment::open(&self.dir, data.lsn_hi).expect("rotate WAL segment");
-                }
-
-                // PUSH write-job
-                let size = data.out.len() as u64;
-                self.pending.push_back(
-                    IoWork::write(data, self.seg.offset)
-                );
-
-                // ~~TODO: offset not changes! FNG BULLSHIT~~
-                self.seg.offset += size;
-            }
-
             // todo: fucking answers!! [meeeh]
             // todo: fucking fsync! [meeh]
-            // todo: FUCKING COMPACT!!!!!!!!!!!
+            // if self.planner.should_fsync(Instant::now()) {
+                // self.pending.push_back(IoWork::Fsync { todo!() });
+            // }
 
             let is_need_submit = self.handle_pending();
             self.reap_cqes();
 
             // Parking on IO if there out-of-sping!
             if (self.out_of_spins() && !self.inflight.is_empty()) || self.ring_is_full() {
-                if let Err(e) = self.ring.submit_and_wait(1) {
-                    if e.raw_os_error() != Some(libc::EINTR) {
-                        panic!("io_uring submit_and_wait failed: {}", e);
-                    }
-                }
+                self.submit_ring_and_park(1);
             }
             else if is_need_submit {
                 // tODO: nope, create a FsyncPlanner stateless stuff
-                if self.mode.do_fsync() {
-                    self.pending.push_back(IoWork::Fsync);
-                }
+                // if self.mode.do_fsync() {  // todo: remove this one
+                //     self.pending.push_back(IoWork::Fsync);
+                // }
 
                 // Actually, I can remove this ONE syscall, and just create a sq-watcher on the side of the kernel.
                 if let Err(e) = self.ring.submit() {
@@ -221,25 +204,26 @@ impl WalEngine {
     }
 
 
-    fn poll_channel_or_park(&mut self) -> Option<Batch> {
-        let mut batch = if self.should_park() {
-            self.batch_rx.recv().ok()?
+    fn poll_channel_or_park(&mut self) -> Option<WalMsg> {
+        if self.should_park() {
+            Some(self.msg_rx.recv().expect("stage 2->3 channel closed"))
         } else {
-            match self.batch_rx.try_recv() {
-                Ok(buf) => buf,
+            match self.msg_rx.try_recv() {
+                Ok(buf) => Some(buf),
                 Err(TryRecvError::Empty) => {
                     self.spin_budget -= 1;
-                    return None
+                    None
                 },
-                Err(_) => panic!("Stage 2->3 communication has been broken"),
+                Err(_) => panic!("stage 2->3 channel closed"),
             }
-        };
+        }
+    }
 
+    fn handle_batch(&mut self, mut batch: Batch) {
         // We handle this here instead of stage 2 because stage 2
         // is already a heavily loaded thread. According to the profiler,
         // stage 3 is only at ~40% load, so the WAL output buffer
         // construction has been moved here.
-        // AND
         let mut lsn = batch.lsn_low;
         for req in batch.items.iter() {
             match req.op() {
@@ -252,15 +236,66 @@ impl WalEngine {
             }
         }
 
-        // update spin-budget
-        self.spin_budget = DEFAULT_SPIN_BUDGET;
+        assert!(batch.lsn_hi > self.last_ingested_lsn, "batches out of LSN order. This is a bug, report it");
+        self.last_ingested_lsn = batch.lsn_hi;
 
-        Some(batch)
+        let offset = self.seg.offset;
+        self.seg.offset += batch.out.len() as u64;
+        // self.fsync_planner // todo create this
+        self.pending.push_back(IoWork::write(batch, offset));
+    }
+
+    fn rotate(&mut self, boundary_lsn: u64) {
+        // todo: okay... I can't drop the current segment because writing to it might still be ongoing
+        // soooo...I'll just sync-wait until all the recordings are finished :)
+        //
+        // Maybe I'll make this asynchronous later, too
+        while !self.inflight.is_empty() || !self.pending.is_empty() {
+            self.handle_pending();
+            self.submit_ring_and_park(1);
+            // yeah, I also hate the fact that I have to call reap_cqes HERE!!!
+            self.reap_cqes();
+        }
+
+        // Seal the old segment: sync fsync is fine, rotation is rare.
+        unsafe { libc::fsync(self.seg.fd) }; // todo: handle it?
+        // TODO: also process FSYNC here later
+
+        // and now we're ready
+        self.seg = Segment::open(&self.dir, boundary_lsn).expect("open segment");
+    }
+
+    fn retire(&mut self, boundary_lsn: u64) {
+        if self.seg.start_lsn < boundary_lsn {
+            panic!("Segment starts after the boundary LSN. This is a bug, report to programmer")
+        }
+
+        if let Ok(segs) = persist::list_segments(&self.dir) {
+            for (lsn, path) in segs {
+                if lsn < boundary_lsn {
+                    self.pending.push_back(
+                        IoWork::Remove(path)
+                    );
+                }
+            }
+        }
+    }
+
+    fn submit_ring_and_park(&mut self, want: usize) {
+        if let Err(e) = self.ring.submit_and_wait(want) {
+            if e.raw_os_error() != Some(libc::EINTR) {
+                panic!("io_uring submit_and_wait failed: {}", e);
+            }
+        }
     }
 
     // SQ
     // return: something was added
     fn handle_pending(&mut self) -> bool {
+        if self.pending.is_empty() {
+            return false
+        }
+
         let mut sq = self.ring.submission();
         let before_pull = self.inflight.len();
 

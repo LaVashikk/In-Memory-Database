@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 pub mod persist;
+pub mod snapshot;
 
 // wire protocol opcodes
 pub const OP_GET: u8 = 0;
