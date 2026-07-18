@@ -22,10 +22,10 @@ pub fn checksum(b: &[u8]) -> u64 {
 
 // Body: [len](wire-body | [lsn][op][k-len][key][value])[checksum]
 // size: (8 + 4 + '1' + 4 + key + value + 8) - todo 'bad padding' probably
-pub fn encode_put(out: &mut Vec<u8>, lsn: u64, wire_bytes_blob: &[u8]) {
+pub fn encode_wal(out: &mut Vec<u8>, lsn: u64, wire_bytes_blob: &[u8]) {
     let body_len = 8 + wire_bytes_blob.len(); // lsn + body lenght
     out.extend_from_slice(&(body_len as u32).to_le_bytes()); // todo: u32 or u64?
-    let body_start = out.len() + 4;
+    let body_start = out.len();
 
     // LSN
     out.extend_from_slice(&(lsn).to_le_bytes());
@@ -87,7 +87,7 @@ fn load_snapshot(bytes: &[u8], db: &mut Db) -> Option<u64> {
         let val_len = rd_u32(&bytes[p..p+4]);
         p += 4;
         let val = &bytes[p..p + val_len];
-        p += key_len;
+        p += val_len;
 
         db.insert_raw(key, val);
 
