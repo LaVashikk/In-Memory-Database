@@ -1,20 +1,38 @@
 use std::collections::VecDeque;
 use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::mpsc::{self as sync_mpsc, TryRecvError};
-use anyhow::{Context, bail};
 use io_uring::{IoUring, opcode, squeue, types};
 use raw_shared_types::{Batch, OP_PUT, persist};
 use slab::Slab;
 
-use crate::{SEG_BYTES, WalMsg};
+use crate::acker::{AckPoint, Acker};
+use crate::WalMsg;
 use crate::args::Mode;
+
+mod fsync_planner;
+
+type LSN = u64;
 
 // todo: too heavy?
 pub enum Verdict {
-    Ok(Option<Batch>), // return batch??
+    /// The operation fully succeeded
+	///
+	/// `Some(batch)` - it was a write op. It is necessary to respond to the clients
+	/// `None` - the operation carried no batch (fsync, segment removal)
+    Ok(Option<Batch>),
+
+    /// The operation made no or partial progress for a transient reason.
+	/// its offset and length already point at the first unwritten byte
     Retry(IoWork),
+
+    /// An fsync completed: every record from group-commit is now on stable storage
+    Durable(LSN),
+
+    /// Unrecoverable I/O failure (bad fd, ENOSPC, ...)
+	/// Durability can't longer be promised
     Fatal(std::io::Error),
 }
 
@@ -24,13 +42,11 @@ pub struct WriteOp {
     pub done: usize,
 }
 
-// todo: too heavy!!!!!
-pub enum IoWork {
+/// One unit of in-flight async-I/O
+pub enum IoWork { // todo: too heavy!!!!!
     Write(WriteOp),
-    Fsync,
-    Remove(PathBuf),
-    // Rotation, // todo
-    // Retire, // todo
+    Fsync(LSN),
+    Remove(CString),
 }
 
 impl IoWork {
@@ -53,26 +69,22 @@ impl IoWork {
                     .user_data(user_data)
             },
 
-            IoWork::Fsync => {
+            IoWork::Fsync(_) => {
                 opcode::Fsync::new(fd)
                     .flags(types::FsyncFlags::DATASYNC)
                     .build()
+                    // todo: ~80% of the time new writes in the ring are blocked by this barrier.
+                    // Removing this could significantly improve latency!
                     .flags(squeue::Flags::IO_DRAIN)
                     .user_data(user_data)
             },
 
-            IoWork::Remove(path) => {
-                // PathBuf to CSting
-                todo!()
+            IoWork::Remove(c_path) => {
+                // Path resolved via AT_FDCWD, so a relative path is interpreted against the CWD
+                opcode::UnlinkAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
+                    .build()
+                    .user_data(user_data)
             },
-
-            // IoWork::Rotation => {
-            //     todo!()
-            // },
-
-            // IoWork::Compact => {
-            //     todo!()
-            // },
         }
     }
 
@@ -84,7 +96,7 @@ impl IoWork {
                 }
 
                 if res < 0 {
-                    return Verdict::Fatal(todo!()) // todo: create err
+                    return Verdict::Fatal(std::io::Error::from_raw_os_error(-res))
                 }
 
                 w.done += res as usize;
@@ -95,8 +107,19 @@ impl IoWork {
                 }
             },
 
-            IoWork::Fsync => todo!(),
-            IoWork::Remove(cstring) => todo!(),
+            IoWork::Fsync(target_lsn) => {
+                if res < 0 {
+                    return Verdict::Fatal(std::io::Error::from_raw_os_error(-res))
+                }
+                Verdict::Durable(target_lsn)
+            },
+
+            IoWork::Remove(_) => {
+                if res < 0 && res != -libc::ENOENT {
+                    eprintln!("Warning: failed to unlink WAL segment: code {}", res);
+                }
+                Verdict::Ok(None)
+            },
         }
     }
 }
@@ -104,28 +127,49 @@ impl IoWork {
 const DEFAULT_SPIN_BUDGET: i32 = 500; // todo
 const IO_WAIT_NS: u32 = 500_000;
 
+/// WAL async I/O loop state. Data flow:
+/// msg_rx -> encode -> pending -> ring/inflight -> awaiting_fsync -> recycle_tx
 pub struct WalEngine {
+    // --- non-changing data ---
     dir: PathBuf,
-    last_ingested_lsn: u64,
-    ring: IoUring,
-    seg: Segment,
     mode: Mode,
-    pending: VecDeque<IoWork>,  // or maybe just vec?
+    depth: usize,
+
+    // --- ring machinery ---
+    ring: IoUring,
+    /// Encoded but not yet submitted (FIFO)
+    pending: VecDeque<IoWork>,
+    /// Ops the kernel currently owns, keyed by the CQE's `user_data`
     inflight: Slab<IoWork>,
+    /// Spins left before the loop parks on `msg_rx`
     spin_budget: i32,
 
+    // --- stage2 boundary ---
     msg_rx: sync_mpsc::Receiver<WalMsg>,
+    /// Buffers go back to the pool once nobody owes their clients anything
     recycle_tx: sync_mpsc::Sender<Batch>,
+
+    // --- TODO how to name? ---
+   	/// Watermark: last LSN encoded into the WAL
+    last_ingested_lsn: LSN,
+    /// Current opened wal-file
+    seg: Segment,
+    /// Manager of client responses
+    ack: Acker,
+    fsync_planner: fsync_planner::FsyncPlanner,
+    /// Batches that reached `Written` but still owe someone `Durable`
+    awaiting_fsync: Vec<Batch>,
 }
 
 impl WalEngine {
-    fn new(
+    pub fn new(
         ring_depth: usize,
         dir: PathBuf,
-        start_lsn: u64,
+        start_lsn: LSN,
         mode: Mode,
         batch_rx: sync_mpsc::Receiver<WalMsg>,
         recycle_tx: sync_mpsc::Sender<Batch>,
+        ack: Acker,
     ) -> anyhow::Result<Self> {
         let ring = IoUring::new(ring_depth as u32)?;
         let seg = Segment::open(&dir, start_lsn)?;
@@ -133,34 +177,41 @@ impl WalEngine {
         Ok(
             Self {
                 dir,
-                last_ingested_lsn: start_lsn,
-                ring,
-                seg,
                 mode,
-                pending: VecDeque::with_capacity(ring_depth), // todo: actually, not the real ring_depth, but prob it's ok
+                depth: ring_depth,
+
+                ring,
+                // todo: actually, there is no 'ring_depth', we can have a lot of work in queue, but prob it's ok
+                pending: VecDeque::with_capacity(ring_depth),
                 inflight: Slab::with_capacity(ring_depth),
                 spin_budget: DEFAULT_SPIN_BUDGET,
 
                 msg_rx: batch_rx,
                 recycle_tx,
+
+                last_ingested_lsn: start_lsn,
+                seg,
+                ack,
+                fsync_planner: fsync_planner::FsyncPlanner::new(mode.into()),
+                awaiting_fsync: Vec::with_capacity(crate::N_BUFFERS),
             }
         )
     }
 
-    fn out_of_spins(&self) -> bool {
+    pub fn out_of_spins(&self) -> bool {
         self.spin_budget <= 0
     }
-    fn should_park(&self) -> bool {
+    pub fn should_park(&self) -> bool {
         self.pending.is_empty() && self.inflight.is_empty()
     }
-    fn ring_is_full(&self) -> bool {
-        self.inflight.len() == self.inflight.capacity() // todo: Can I access the capacity and call realloc?? maybe use depth value?
+    pub fn ring_is_full(&self) -> bool {
+        self.inflight.len() >= self.depth
     }
 
 
-    // Spin-loop strategy with a budget. If we receive enough new requests, we don't park, but continuously
-    // add work. However, if there are very few requests, spinning makes no sense, so we park and wait for data from the ring-cq.
-    fn start(mut self) {
+    /// Spin-loop strategy with a budget. If we receive enough new requests, we don't park, but continuously
+    /// add work. However, if there are very few requests, spinning makes no sense, so we park and wait for data from the ring-cq.
+    pub fn start(mut self) {
         loop {
             if let Some(msg) = self.poll_channel_or_park() {
                 match msg {
@@ -172,15 +223,11 @@ impl WalEngine {
                 self.spin_budget = DEFAULT_SPIN_BUDGET;
             }
 
-            // todo: answers in processing_cqes - but if it's a full GET BATCH - there will be no answers at all!
-            // HOWEVER, I'm thinking about dropping GET answers immediately in stage 2, without even moving them to stage 3!! seems like a solid idea.
-            // todo 2: okay, but if the batch is empty without 'out' - it simply won't return to the pool - and it will die!!
-
-            // todo: fucking answers!! [meeeh]
-            // todo: fucking fsync! [meeh]
-            // if self.planner.should_fsync(Instant::now()) {
-                // self.pending.push_back(IoWork::Fsync { todo!() });
-            // }
+            if self.fsync_planner.should_fsync() {
+                self.pending.push_back(
+                    IoWork::Fsync(self.last_ingested_lsn)
+                );
+            }
 
             let is_need_submit = self.handle_pending();
             self.reap_cqes();
@@ -190,12 +237,7 @@ impl WalEngine {
                 self.submit_ring_and_park(1);
             }
             else if is_need_submit {
-                // tODO: nope, create a FsyncPlanner stateless stuff
-                // if self.mode.do_fsync() {  // todo: remove this one
-                //     self.pending.push_back(IoWork::Fsync);
-                // }
-
-                // Actually, I can remove this ONE syscall, and just create a sq-watcher on the side of the kernel.
+                // Actually, I can remove this ONE syscall, and just create a sq-watcher on the side of the kernel
                 if let Err(e) = self.ring.submit() {
                     panic!("io_uring submit failed: {}", e);
                 }
@@ -220,28 +262,35 @@ impl WalEngine {
     }
 
     fn handle_batch(&mut self, mut batch: Batch) {
+        // The stream must be gapless: this batch continues exactly where the last one ended
+        assert_eq!(batch.lsn_low, self.last_ingested_lsn, "WAL gap or reorder");
+
         // We handle this here instead of stage 2 because stage 2
         // is already a heavily loaded thread. According to the profiler,
         // stage 3 is only at ~40% load, so the WAL output buffer
-        // construction has been moved here.
+        // construction has been moved here :)
         let mut lsn = batch.lsn_low;
         for req in batch.items.iter() {
             match req.op() {
                 OP_PUT => {
-                    lsn += 1; // before or after doing incr????
-                    persist::encode_put(&mut batch.out, lsn, &req.data);
+                    lsn += 1;
+                    persist::encode_wal(&mut batch.out, lsn, &req.data);
                 }
 
                 _ => continue
             }
         }
 
-        assert!(batch.lsn_hi > self.last_ingested_lsn, "batches out of LSN order. This is a bug, report it");
+        // Stage 2 counted the PUTs; stage 3 must have encoded exactly that many
+        debug_assert_eq!(lsn, batch.lsn_hi, "stage2/stage3 PUT count diverged");
+
         self.last_ingested_lsn = batch.lsn_hi;
 
         let offset = self.seg.offset;
-        self.seg.offset += batch.out.len() as u64;
-        // self.fsync_planner // todo create this
+        let batch_size = batch.out.len() as u64;
+        self.seg.offset += batch_size;
+        self.fsync_planner.on_write_queued(batch_size);
+
         self.pending.push_back(IoWork::write(batch, offset));
     }
 
@@ -257,9 +306,17 @@ impl WalEngine {
             self.reap_cqes();
         }
 
-        // Seal the old segment: sync fsync is fine, rotation is rare.
-        unsafe { libc::fsync(self.seg.fd) }; // todo: handle it?
-        // TODO: also process FSYNC here later
+        // Seal the old segment: sync fsync is fine for now, rotation is rare
+        let ret = unsafe { libc::fsync(self.seg.fd.0) };
+        assert_eq!(ret, 0, "fsync on segment seal failed");
+        self.fsync_planner.on_fsync_completed();
+
+        // and process awaiting_fsync to answer clients and recycle batch
+        for mut b in self.awaiting_fsync.drain(..) {
+            self.ack.advance(&mut b, AckPoint::Durable);
+            b.recycle();
+            let _ = self.recycle_tx.send(b);
+        }
 
         // and now we're ready
         self.seg = Segment::open(&self.dir, boundary_lsn).expect("open segment");
@@ -270,11 +327,13 @@ impl WalEngine {
             panic!("Segment starts after the boundary LSN. This is a bug, report to programmer")
         }
 
+        // todo: add rotation rules and use here
         if let Ok(segs) = persist::list_segments(&self.dir) {
             for (lsn, path) in segs {
                 if lsn < boundary_lsn {
+                    let c_path = CString::new(path.as_os_str().as_bytes()).expect("Path contains null bytes");
                     self.pending.push_back(
-                        IoWork::Remove(path)
+                        IoWork::Remove(c_path)
                     );
                 }
             }
@@ -290,7 +349,7 @@ impl WalEngine {
     }
 
     // SQ
-    // return: something was added
+    // returns true if the job was added to inflight
     fn handle_pending(&mut self) -> bool {
         if self.pending.is_empty() {
             return false
@@ -299,12 +358,12 @@ impl WalEngine {
         let mut sq = self.ring.submission();
         let before_pull = self.inflight.len();
 
-        while !sq.is_full() {
+        while !sq.is_full() && self.inflight.len() < self.depth {
             if let Some(work) = self.pending.pop_front() {
                 let vacant = self.inflight.vacant_entry();
                 let entry_idx = vacant.key() as u64;
 
-                let sqe = work.sqe(types::Fd(self.seg.fd), entry_idx); // todo: use types fd wrapper, probably
+                let sqe = work.sqe(self.seg.fd, entry_idx);
                 unsafe { sq.push(&sqe).unwrap() };
                 vacant.insert(work);
             } else {
@@ -326,24 +385,45 @@ impl WalEngine {
             match work.complete(result) {
                 Verdict::Ok(maybe_batch) => {
                     if let Some(mut batch) = maybe_batch {
-                        // sync/nofsync mode: reply after write/fsync finishes
-                        // TODO: nah, i'll create the 'Acker' tomorrow
-                        if self.mode.reply_in_stage3() {
-                            for req in batch.items.iter_mut() {
-                                if let Some(r) = req.resp.take() {
-                                    let _ = req.reply.blocking_send(r);
-                                }
-                            }
-                        }
+                        self.ack.advance(&mut batch, AckPoint::Written);
 
-                        batch.recycle();
-                        let _ = self.recycle_tx.send(batch);
+                        if self.ack.is_settled(&batch) {
+                            // No one in the batch is waiting for fsync
+                            batch.recycle();
+                            let _ = self.recycle_tx.send(batch);
+                        } else {
+                            // Clients are waiting for Durable status!
+                            self.awaiting_fsync.push(batch);
+                        }
                     }
                 },
 
                 Verdict::Retry(io_work) => {
-                    self.pending.push_back(io_work); // todo: or push_front?
+                    if let IoWork::Write(ref w) = io_work {
+                        self.fsync_planner.on_write_queued((w.data.out.len() - w.done) as u64);
+                    }
+                    self.pending.push_front(io_work);
                 },
+
+                Verdict::Durable(target_lsn) => { // todo
+                    let mut i = 0;
+                    let iter = &mut self.awaiting_fsync;
+
+                    // Cannot use a 'for' here, because we modifies the vector in-place
+                    // and requires us to re-check the swapped element at index 'i' :>
+                    while i < iter.len() {
+                        if iter[i].lsn_hi <= target_lsn {
+                            let mut batch = iter.swap_remove(i);
+                            self.ack.advance(&mut batch, AckPoint::Durable);
+                            batch.recycle();
+                            let _ = self.recycle_tx.send(batch);
+                        } else {
+                            i += 1;
+                        }
+                    }
+
+                    self.fsync_planner.on_fsync_completed();
+                }
 
                 Verdict::Fatal(error) => {
                     panic!("Fatal I/O error in WAL disk worker: {}. Halting to prevent data corruption.", error);
@@ -356,7 +436,7 @@ impl WalEngine {
 
 struct Segment {
     _file: std::fs::File, // keep open for RAII
-    fd: i32,
+    fd: types::Fd,
     offset: u64,
     fsync_offset: u64,
     start_lsn: u64,
@@ -370,7 +450,7 @@ impl Segment {
             .open(&path)?;
 
         let bytes = file.metadata()?.len();
-        let fd = file.as_raw_fd();
+        let fd = types::Fd(file.as_raw_fd());
 
         Ok(Segment {
             _file: file,
@@ -381,25 +461,3 @@ impl Segment {
         })
     }
 }
-
-
-// // remove old wal segments fully covered by durable snapshot
-// fn compact(dir: &std::path::Path, durable_lsn: u64, active_start: u64) { // todo: temp impl
-//     let segs = match persist::list_segments(dir) {
-//         Ok(s) => s,
-//         Err(_) => return,
-//     };
-
-//     for i in 0..segs.len() {
-//         let (start, ref path) = segs[i];
-//         if start == active_start {
-//             continue;
-//         }
-
-//         // if next seg start is <= durable_lsn + 1, current seg is fully in snapshot
-//         let next_start = segs.get(i + 1).map(|(s, _)| *s).unwrap_or(u64::MAX);
-//         if next_start <= durable_lsn + 1 {
-//             let _ = std::fs::remove_file(path);
-//         }
-//     }
-// }

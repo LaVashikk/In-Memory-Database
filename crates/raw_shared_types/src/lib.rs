@@ -128,6 +128,10 @@ impl Request {
     pub fn val(&self) -> &[u8] {
         &self.data[5 + self.klen()..]
     }
+#[inline(always)]
+    pub fn is_read_only(&self) -> bool {
+        self.op() != OP_PUT
+    }
 }
 
 // batch struct that circulates in fixed ring pool. fields are reused [!!]
@@ -154,6 +158,11 @@ impl Batch {
         self.out.clear();
         self.lsn_low = 0;
         self.lsn_hi = 0;
+    }
+
+    #[inline(always)]
+    pub fn has_wal_work(&self) -> bool {
+        self.lsn_hi > self.lsn_low
     }
 }
 

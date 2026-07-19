@@ -22,16 +22,17 @@ pub const SNAPSHOT_MIN_LSN_GAP: u64 = 500_000;
 // rotate wal file after this many bytes
 const SEG_BYTES: u64 = 256 * 1024 * 1024;
 
-
-pub const RING_DEPTH: u32 = 128;
+// configurate it?
+pub const RING_DEPTH: usize = 128;
 pub const MAX_BATCH: usize = 1024;
-pub const N_BUFFERS: usize = 8;
+pub const N_BUFFERS: usize = 32;
 pub const OUT_CAP: usize = 256 * 1024;
 pub const REQ_BOUND: usize = 65_536;
 pub const RESP_BOUND: usize = 8_192;
 
 mod args;
 use args::*;
+pub mod acker;
 
 mod stage1; // todo: make better naming
 mod stage2;
@@ -51,6 +52,9 @@ fn main() -> anyhow::Result<()> {
 
     // recover state before opening listening port
     let (db, start_lsn) = persist::recover(&args.dir).context("cannot recover DB state!")?;
+    let acker = acker::Acker::new(args.mode);
+
+    // dbg!(&db);
 
     // pipeline channels
     // TODO: make better naming here
@@ -85,17 +89,17 @@ fn main() -> anyhow::Result<()> {
     {
         // TODO: remake it!!!!!
         let dir = args.dir.clone();
-        let ring = IoUring::new(64).expect("io_uring_setup");
+        let wal_engine = stage3::WalEngine::new(RING_DEPTH, dir, start_lsn, args.mode, s23_rx, pool_tx, acker)?;
         thread::Builder::new()
             .name("stage3".into())
-            .spawn(move || stage3::run_io_worker(s23_rx, pool_tx, ring, args.mode, dir, start_lsn))
+            .spawn(move || wal_engine.start())
             .context("failed to spawn stage-3")?;
     }
 
     eprintln!("server starting: port={} mode={:?} dir={:?} start_lsn={}", args.port, args.mode, args.dir, start_lsn);
 
     // main thread is the 'stage 2' - main DB-worker!
-    stage2::run_main_loop(item_rx, pool_rx, s23_tx, db, start_lsn, args.mode, args.dir);
+    stage2::run_main_loop(item_rx, pool_rx, s23_tx, db, acker, start_lsn, args.mode, args.dir);
 
     unreachable!()
 }
