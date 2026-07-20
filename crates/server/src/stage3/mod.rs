@@ -29,7 +29,7 @@ pub enum Verdict {
     Retry(IoWork),
 
     /// An fsync completed: every record from group-commit is now on stable storage
-    Durable(LSN),
+    Durable,
 
     /// Unrecoverable I/O failure (bad fd, ENOSPC, ...)
 	/// Durability can't longer be promised
@@ -107,11 +107,11 @@ impl IoWork {
                 }
             },
 
-            IoWork::Fsync(target_lsn) => {
+            IoWork::Fsync(_target_lsn) => {
                 if res < 0 {
                     return Verdict::Fatal(std::io::Error::from_raw_os_error(-res))
                 }
-                Verdict::Durable(target_lsn)
+                Verdict::Durable
             },
 
             IoWork::Remove(_) => {
@@ -125,14 +125,12 @@ impl IoWork {
 }
 
 const DEFAULT_SPIN_BUDGET: i32 = 500; // todo
-const IO_WAIT_NS: u32 = 500_000;
 
 /// WAL async I/O loop state. Data flow:
 /// msg_rx -> encode -> pending -> ring/inflight -> awaiting_fsync -> recycle_tx
 pub struct WalEngine {
     // --- non-changing data ---
     dir: PathBuf,
-    mode: Mode,
     depth: usize,
 
     // --- ring machinery ---
@@ -177,7 +175,6 @@ impl WalEngine {
         Ok(
             Self {
                 dir,
-                mode,
                 depth: ring_depth,
 
                 ring,
@@ -227,6 +224,7 @@ impl WalEngine {
                 self.pending.push_back(
                     IoWork::Fsync(self.last_ingested_lsn)
                 );
+                self.seg.fsync_offset = self.seg.offset;
             }
 
             let is_need_submit = self.handle_pending();
@@ -405,21 +403,11 @@ impl WalEngine {
                     self.pending.push_front(io_work);
                 },
 
-                Verdict::Durable(target_lsn) => { // todo
-                    let mut i = 0;
-                    let iter = &mut self.awaiting_fsync;
-
-                    // Cannot use a 'for' here, because we modifies the vector in-place
-                    // and requires us to re-check the swapped element at index 'i' :>
-                    while i < iter.len() {
-                        if iter[i].lsn_hi <= target_lsn {
-                            let mut batch = iter.swap_remove(i);
-                            self.ack.advance(&mut batch, AckPoint::Durable);
-                            batch.recycle();
-                            let _ = self.recycle_tx.send(batch);
-                        } else {
-                            i += 1;
-                        }
+                Verdict::Durable => {
+                    for mut batch in self.awaiting_fsync.drain(..) {
+                        self.ack.advance(&mut batch, AckPoint::Durable);
+                        batch.recycle();
+                        let _ = self.recycle_tx.send(batch);
                     }
 
                     self.fsync_planner.on_fsync_completed();
