@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use raw_shared_types::{Operation, Resp, encode_raw};
+use wire::{Operation, Resp};
 
 use crate::reader::FrameReader;
 
@@ -110,7 +110,7 @@ fn driver<A: ToSocketAddrs + Clone>(
 
             write_buf.clear();
             for call in batch {
-                encode_raw(&mut write_buf, call.op, &call.key, call.value.as_deref());
+                wire::encode_raw(&mut write_buf, call.op, &call.key, call.value.as_deref());
                 let _ = fifo_tx.send(call.tx);
             }
 

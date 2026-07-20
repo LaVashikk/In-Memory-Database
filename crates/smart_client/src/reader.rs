@@ -4,7 +4,7 @@
 //! then pulls decoded frames via `try_extract()`. Works identically for
 //! sync and async callers; the only difference is how bytes are obtained.
 
-use raw_shared_types::{Resp, rd_u32};
+use wire::Resp;
 
 const FRAME_HDR: usize = 4; // u32 LE length prefix
 
@@ -32,7 +32,7 @@ impl FrameReader {
             return None;
         }
 
-        let body_len = rd_u32(&self.buf[..FRAME_HDR]);
+        let body_len = wire::rd_u32(&self.buf[..FRAME_HDR]);
         let total = FRAME_HDR + body_len;
         if self.buf.len() < total {
             return None;

@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use raw_shared_types::{Operation, Resp, encode_raw};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, mpsc, oneshot},
 };
+use wire::{Operation, Resp};
 
 use crate::reader::FrameReader;
 
@@ -126,7 +126,7 @@ where W: AsyncWriteExt + Unpin,
 
         write_buf.clear();
         for call in batch {
-            encode_raw(&mut write_buf, call.op, &call.key, call.value.as_deref());
+            wire::encode_raw(&mut write_buf, call.op, &call.key, call.value.as_deref());
             let _ = fifo_tx.send(call.tx);
         }
 

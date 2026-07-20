@@ -25,4 +25,4 @@ pub use sync::Client;
 #[cfg(feature = "tokio")]
 pub use async_client::AsyncClient;
 
-pub use raw_shared_types::{Operation, Resp, OP_GET, OP_PUT};
+pub use wire::{Operation, Resp};

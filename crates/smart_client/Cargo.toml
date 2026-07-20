@@ -9,7 +9,7 @@ default = ["tokio"]
 tokio = ["dep:tokio"]
 
 [dependencies]
-raw_shared_types.workspace = true
+wire.workspace = true
 anyhow.workspace = true
 
 tokio = { workspace = true, optional = true }
