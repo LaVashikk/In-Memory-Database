@@ -4,6 +4,7 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+num_enum = "0.7.6"
 
 [lints]
 workspace = true

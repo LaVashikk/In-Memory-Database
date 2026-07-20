@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use num_enum::{FromPrimitive, IntoPrimitive};
+
 // wire protocol opcodes
 pub const OP_GET: u8 = 0;
 pub const OP_PUT: u8 = 1;
@@ -8,14 +10,16 @@ pub const OP_PUT: u8 = 1;
 /// Wire body layout: [op:1][klen:u32][key][val]
 pub const BODY_HDR: usize = 5;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum Operation {
     Get = OP_GET,
     Put = OP_PUT,
     // todo
-}
 
+    #[num_enum(catch_all)]
+    Unknown(u8),
+}
 
 // raw method for encoding request to wire-protocol
 pub fn encode_raw(buf: &mut Vec<u8>, op: Operation, key: &[u8], value: Option<&[u8]>) -> usize {
@@ -31,7 +35,7 @@ pub fn encode_raw(buf: &mut Vec<u8>, op: Operation, key: &[u8], value: Option<&[
     // WIRE-PROTO: [len] + [op][klen:u32][key][val]
     buf.extend_from_slice(&(body_len as u32).to_le_bytes());
 
-    buf.push(op as u8);
+    buf.push(op.into());
     buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
     buf.extend_from_slice(key);
 
@@ -54,6 +58,7 @@ pub fn encode(op: Operation, key: &[u8], value: Option<&[u8]>) -> Option<Vec<u8>
 }
 
 
+// todo: pack it
 #[inline(always)]
 pub fn op(body: &[u8]) -> u8 { body[0] }
 
