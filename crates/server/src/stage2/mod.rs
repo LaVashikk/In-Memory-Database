@@ -1,10 +1,44 @@
 use std::path::PathBuf;
 use std::sync::mpsc as sync_mpsc;
-use raw_shared_types::{Batch, Db, Request, persist, snapshot::Snapshotter};
+use storage::Db;
+use storage::snapshot::Snapshotter;
 use tokio::sync::mpsc as async_mpsc;
+use wire::{Operation, Resp};
 
 use super::{MAX_BATCH, SNAPSHOT_MIN_LSN_GAP};
-use crate::{SNAPSHOT_EVERY_LSN, WalMsg, acker::{AckPoint, Acker}, args::Mode};
+use crate::types::Request;
+use crate::{SNAPSHOT_EVERY_LSN, WalMsg, types::Batch};
+use crate::acker::{AckPoint, Acker};
+
+/// LSN convention (half-open): batch owns (lsn_low, lsn_hi];
+/// the watermark is incremented BEFORE each PUT.
+fn apply_batch(db: &mut Db, batch: &mut Batch, lsn: &mut u64) {
+    batch.lsn_low = *lsn;
+
+    for req in batch.items.iter_mut() {
+        match req.op() {
+            // 'GET' - just return the value if we have it
+            Operation::Get => {
+                req.resp = Some(match db.get(req.key()) {
+                    Some(v) => Resp::Value(v.clone()), // cheap ARC clone
+                    None => Resp::Miss,
+                });
+            }
+
+            // 'PUT' - set/change value in table
+            Operation::Put => {
+                *lsn += 1;
+                let (k, v) = req.split_kv();
+                db.put(k, v);
+                req.resp = Some(Resp::Ok);
+            }
+
+            Operation::Unknown(_) => req.resp = Some(Resp::UnknownOp),
+        }
+    }
+
+    batch.lsn_hi = *lsn;
+}
 
 // single sync db thread
 #[allow(clippy::too_many_arguments)]
@@ -15,7 +49,6 @@ pub fn run_main_loop(
     mut db: Db,
     ack: Acker,
     start_lsn: u64,
-    mode: Mode,
     dir: PathBuf,
 ) {
     let mut snapshotter = Snapshotter::new(start_lsn, SNAPSHOT_MIN_LSN_GAP);
@@ -33,7 +66,8 @@ pub fn run_main_loop(
         if n == 0 {
             break;
         }
-        db.apply(&mut batch, &mut lsn);
+
+        apply_batch(&mut db, &mut batch, &mut lsn);
 
         // The batch is applied to the in-memory state: every request now holds
         // its response, so the `Applied` guarantee level is reached

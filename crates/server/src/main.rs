@@ -1,26 +1,25 @@
 // wip server binary: pipeline + crash recovery
+mod args;
+mod types;
+mod acker;
+
+// todo: make better naming
+mod stage1;
+mod stage2;
+mod stage3;
 
 use std::sync::mpsc as sync_mpsc;
 use std::thread;
 
 use anyhow::Context;
 use clap::Parser;
-use io_uring::IoUring;
-use raw_shared_types::{Batch, Request, persist};
-use tokio::net::TcpListener;
 use tokio::sync::mpsc as async_mpsc;
-
-#[cfg(feature = "allocator_debug")]
-mod alloc_stat;
-#[cfg(feature = "allocator_debug")]
-#[global_allocator]
-static GLOBAL: alloc_stat::Counting = alloc_stat::Counting;
+use args::*;
+use types::{Batch, Request};
 
 // trigger snapshot & wal compaction every N puts
 pub const SNAPSHOT_EVERY_LSN: u64 = 2_000_000;
 pub const SNAPSHOT_MIN_LSN_GAP: u64 = 500_000;
-// rotate wal file after this many bytes
-const SEG_BYTES: u64 = 256 * 1024 * 1024;
 
 // configurate it?
 pub const RING_DEPTH: usize = 128;
@@ -29,14 +28,14 @@ pub const N_BUFFERS: usize = 32;
 pub const OUT_CAP: usize = 256 * 1024;
 pub const REQ_BOUND: usize = 65_536;
 pub const RESP_BOUND: usize = 8_192;
+// todo: rotation settings
 
-mod args;
-use args::*;
-pub mod acker;
+#[cfg(feature = "allocator_debug")]
+mod alloc_stat;
+#[cfg(feature = "allocator_debug")]
+#[global_allocator]
+static GLOBAL: alloc_stat::Counting = alloc_stat::Counting;
 
-mod stage1; // todo: make better naming
-mod stage2;
-mod stage3;
 
 pub enum WalMsg {
     Write(Batch),
@@ -51,7 +50,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // recover state before opening listening port
-    let (db, start_lsn) = persist::recover(&args.dir).context("cannot recover DB state!")?;
+    let (db, start_lsn) = storage::recover(&args.dir).context("cannot recover DB state!")?;
     let acker = acker::Acker::new(args.mode);
 
     // dbg!(&db);
@@ -99,7 +98,7 @@ fn main() -> anyhow::Result<()> {
     eprintln!("server starting: port={} mode={:?} dir={:?} start_lsn={}", args.port, args.mode, args.dir, start_lsn);
 
     // main thread is the 'stage 2' - main DB-worker!
-    stage2::run_main_loop(item_rx, pool_rx, s23_tx, db, acker, start_lsn, args.mode, args.dir);
+    stage2::run_main_loop(item_rx, pool_rx, s23_tx, db, acker, start_lsn, args.dir);
 
     unreachable!()
 }

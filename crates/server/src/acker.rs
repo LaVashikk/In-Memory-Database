@@ -1,6 +1,4 @@
-use raw_shared_types::{Batch, OP_PUT, Request};
-
-use crate::args::Mode;
+use crate::{args::Mode, types::{Batch, Request}};
 
 /// Durability guarantee levels
 /// Order is strictly significant: each subsequent level implies the previous ones have been met

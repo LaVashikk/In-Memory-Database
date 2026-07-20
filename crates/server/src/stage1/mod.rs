@@ -1,13 +1,13 @@
-use std::time::Duration;
-use anyhow::Context;
 use bytes::BytesMut;
-use raw_shared_types::{Request, Resp};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc as async_mpsc;
+use wire::Resp;
+use crate::types::Request;
+
 use super::RESP_BOUND;
 
-pub async fn start_server(port: u16, item_tx: tokio::sync::mpsc::Sender<Request>) {
+pub async fn start_server(port: u16, item_tx: tokio::sync::mpsc::Sender<Request>) -> ! {
     #[cfg(feature = "allocator_debug")]
     tokio::spawn(async {
         let mut last = super::alloc_stat::snapshot();
@@ -36,8 +36,6 @@ pub async fn start_server(port: u16, item_tx: tokio::sync::mpsc::Sender<Request>
             handle_conn(sock, item_tx.clone())
         );
     }
-
-    unreachable!()
 }
 
 // network ingress (tokio)

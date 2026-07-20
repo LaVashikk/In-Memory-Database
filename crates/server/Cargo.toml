@@ -3,18 +3,17 @@ name = "server"
 edition.workspace = true
 version.workspace = true
 
-[profile.release]
-opt-level     = 3
-lto           = "thin"
-codegen-units = 1
-panic         = "abort"
+[[bench]]
+name = "loadgen"
+harness = false
 
 [dependencies]
-io-uring    = "0.7"
-clap = { version = "4.6.1", features = ["derive"] }
+wire.workspace = true
+storage.workspace = true
 tokio.workspace = true
 libc.workspace = true
-raw_shared_types.workspace = true
+io-uring    = "0.7"
+clap = { version = "4.6.1", features = ["derive"] }
 anyhow.workspace = true
 bytes = "1.12.0"
 slab = "0.4.12"

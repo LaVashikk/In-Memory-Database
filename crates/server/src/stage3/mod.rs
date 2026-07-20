@@ -1,130 +1,27 @@
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::mpsc::{self as sync_mpsc, TryRecvError};
-use io_uring::{IoUring, opcode, squeue, types};
-use raw_shared_types::{Batch, OP_PUT, persist};
+use io_uring::IoUring ;
 use slab::Slab;
+use storage::wal_format;
+use wire::Operation;
 
 use crate::acker::{AckPoint, Acker};
 use crate::WalMsg;
 use crate::args::Mode;
+use crate::types::Batch;
+use segment::Segment;
+use io_work::*;
 
+mod segment;
+mod io_work;
 mod fsync_planner;
 
 type LSN = u64;
 
-// todo: too heavy?
-pub enum Verdict {
-    /// The operation fully succeeded
-	///
-	/// `Some(batch)` - it was a write op. It is necessary to respond to the clients
-	/// `None` - the operation carried no batch (fsync, segment removal)
-    Ok(Option<Batch>),
-
-    /// The operation made no or partial progress for a transient reason.
-	/// its offset and length already point at the first unwritten byte
-    Retry(IoWork),
-
-    /// An fsync completed: every record from group-commit is now on stable storage
-    Durable,
-
-    /// Unrecoverable I/O failure (bad fd, ENOSPC, ...)
-	/// Durability can't longer be promised
-    Fatal(std::io::Error),
-}
-
-pub struct WriteOp {
-    pub data: Batch,
-    pub offset: u64,
-    pub done: usize,
-}
-
-/// One unit of in-flight async-I/O
-pub enum IoWork { // todo: too heavy!!!!!
-    Write(WriteOp),
-    Fsync(LSN),
-    Remove(CString),
-}
-
-impl IoWork {
-    pub fn write(data: Batch, offset: u64) -> Self {
-        Self::Write(
-            WriteOp { data, offset, done: 0 }
-        )
-    }
-
-    pub fn sqe(&self, fd: io_uring::types::Fd, user_data: u64) -> io_uring::squeue::Entry {
-        match self {
-            IoWork::Write(w) => {
-                let remainder = &w.data.out[w.done..];
-                let len = remainder.len() as u32;
-                let ptr = remainder.as_ptr();
-
-                opcode::Write::new(fd, ptr, len)
-                    .offset(w.offset + w.done as u64)
-                    .build()
-                    .user_data(user_data)
-            },
-
-            IoWork::Fsync(_) => {
-                opcode::Fsync::new(fd)
-                    .flags(types::FsyncFlags::DATASYNC)
-                    .build()
-                    // todo: ~80% of the time new writes in the ring are blocked by this barrier.
-                    // Removing this could significantly improve latency!
-                    .flags(squeue::Flags::IO_DRAIN)
-                    .user_data(user_data)
-            },
-
-            IoWork::Remove(c_path) => {
-                // Path resolved via AT_FDCWD, so a relative path is interpreted against the CWD
-                opcode::UnlinkAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
-                    .build()
-                    .user_data(user_data)
-            },
-        }
-    }
-
-    pub fn complete(self, res: i32) -> Verdict {
-        match self {
-            IoWork::Write(mut w) => {
-                if res == -libc::EINTR || res == -libc::EAGAIN {
-                    return Verdict::Retry(IoWork::Write(w))
-                }
-
-                if res < 0 {
-                    return Verdict::Fatal(std::io::Error::from_raw_os_error(-res))
-                }
-
-                w.done += res as usize;
-                if w.done < w.data.out.len() {
-                    Verdict::Retry(IoWork::Write(w))
-                } else {
-                    Verdict::Ok(Some(w.data))
-                }
-            },
-
-            IoWork::Fsync(_target_lsn) => {
-                if res < 0 {
-                    return Verdict::Fatal(std::io::Error::from_raw_os_error(-res))
-                }
-                Verdict::Durable
-            },
-
-            IoWork::Remove(_) => {
-                if res < 0 && res != -libc::ENOENT {
-                    eprintln!("Warning: failed to unlink WAL segment: code {}", res);
-                }
-                Verdict::Ok(None)
-            },
-        }
-    }
-}
-
-const DEFAULT_SPIN_BUDGET: i32 = 500; // todo
+const DEFAULT_SPIN_BUDGET: i32 = 500; // todo: move to main prob?
 
 /// WAL async I/O loop state. Data flow:
 /// msg_rx -> encode -> pending -> ring/inflight -> awaiting_fsync -> recycle_tx
@@ -224,7 +121,7 @@ impl WalEngine {
                 self.pending.push_back(
                     IoWork::Fsync(self.last_ingested_lsn)
                 );
-                self.seg.fsync_offset = self.seg.offset;
+                self.seg.mark_fsynced();
             }
 
             let is_need_submit = self.handle_pending();
@@ -270,12 +167,12 @@ impl WalEngine {
         let mut lsn = batch.lsn_low;
         for req in batch.items.iter() {
             match req.op() {
-                OP_PUT => {
+                Operation::Put => {
                     lsn += 1;
-                    persist::encode_wal(&mut batch.out, lsn, &req.data);
+                    wal_format::encode_record(&mut batch.out, lsn, &req.data);
                 }
 
-                _ => continue
+                Operation::Get | Operation::Unknown(_) => continue
             }
         }
 
@@ -284,9 +181,8 @@ impl WalEngine {
 
         self.last_ingested_lsn = batch.lsn_hi;
 
-        let offset = self.seg.offset;
         let batch_size = batch.out.len() as u64;
-        self.seg.offset += batch_size;
+        let (offset, _) = self.seg.advance_offset(batch_size);
         self.fsync_planner.on_write_queued(batch_size);
 
         self.pending.push_back(IoWork::write(batch, offset));
@@ -305,7 +201,7 @@ impl WalEngine {
         }
 
         // Seal the old segment: sync fsync is fine for now, rotation is rare
-        let ret = unsafe { libc::fsync(self.seg.fd.0) };
+        let ret = unsafe { libc::fsync(self.seg.fd_i32()) };
         assert_eq!(ret, 0, "fsync on segment seal failed");
         self.fsync_planner.on_fsync_completed();
 
@@ -321,12 +217,12 @@ impl WalEngine {
     }
 
     fn retire(&mut self, boundary_lsn: u64) {
-        if self.seg.start_lsn < boundary_lsn {
+        if self.seg.start_lsn() < boundary_lsn {
             panic!("Segment starts after the boundary LSN. This is a bug, report to programmer")
         }
 
         // todo: add rotation rules and use here
-        if let Ok(segs) = persist::list_segments(&self.dir) {
+        if let Ok(segs) = wal_format::list_segments(&self.dir) {
             for (lsn, path) in segs {
                 if lsn < boundary_lsn {
                     let c_path = CString::new(path.as_os_str().as_bytes()).expect("Path contains null bytes");
@@ -361,7 +257,7 @@ impl WalEngine {
                 let vacant = self.inflight.vacant_entry();
                 let entry_idx = vacant.key() as u64;
 
-                let sqe = work.sqe(self.seg.fd, entry_idx);
+                let sqe = work.sqe(self.seg.fd(), entry_idx);
                 unsafe { sq.push(&sqe).unwrap() };
                 vacant.insert(work);
             } else {
@@ -418,34 +314,5 @@ impl WalEngine {
                 },
             }
         }
-    }
-}
-
-
-struct Segment {
-    _file: std::fs::File, // keep open for RAII
-    fd: types::Fd,
-    offset: u64,
-    fsync_offset: u64,
-    start_lsn: u64,
-}
-impl Segment {
-    fn open(dir: &std::path::Path, start_lsn: u64) -> std::io::Result<Segment> {
-        let path = persist::segment_path(dir, start_lsn);
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(&path)?;
-
-        let bytes = file.metadata()?.len();
-        let fd = types::Fd(file.as_raw_fd());
-
-        Ok(Segment {
-            _file: file,
-            offset: bytes,
-            fsync_offset: bytes,
-            fd,
-            start_lsn,
-        })
     }
 }
