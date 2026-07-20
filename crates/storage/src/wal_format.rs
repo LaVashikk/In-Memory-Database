@@ -79,7 +79,7 @@ pub fn decode_record(bytes: &[u8]) -> Option<Record<'_>> {
 
     let body_len = rd_u32(&bytes[0..4]);
 
-    // body: [lsn][op][k-len][key][value]
+    // body: [lsn] + [op][k-len][key][value]
     let body_end = LEN_SIZE + body_len;
     if body_end + CHECKSUM_SIZE > bytes.len() {
         return None;
@@ -95,7 +95,7 @@ pub fn decode_record(bytes: &[u8]) -> Option<Record<'_>> {
 
     Some(Record {
         lsn: rd_u64(&body[0..8]),
-        wire_body: &body,
+        wire_body: &body[8..],
         consumed: body_end + CHECKSUM_SIZE,
     })
 }
