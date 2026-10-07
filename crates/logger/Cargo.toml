@@ -1,0 +1,12 @@
+[package]
+name = "logger"
+version = "1.0.0"
+edition = "2024"
+
+[features]
+default = []
+enable-info-logs = []
+enable-debug-logs = []
+
+[dependencies]
+log = { workspace = true }

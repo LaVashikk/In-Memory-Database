@@ -104,7 +104,7 @@ impl IoWork {
 
             IoWork::Remove(_) => {
                 if res < 0 && res != -libc::ENOENT {
-                    eprintln!("Warning: failed to unlink WAL segment: code {}", res);
+                    logger::warn!("Warning: failed to unlink WAL segment: code {}", res);
                 }
                 Verdict::Ok(None)
             },
@@ -147,6 +147,6 @@ mod tests {
     #[test]
     fn how_heavy_actually() {
         // closes the "too heavy?" todo with a number instead of a feeling
-        eprintln!("size_of<IoWork> = {}", std::mem::size_of::<IoWork>());
+        println!("size_of<IoWork> = {}", std::mem::size_of::<IoWork>());
     }
 }

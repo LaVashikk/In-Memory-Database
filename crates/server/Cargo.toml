@@ -10,6 +10,8 @@ harness = false
 [dependencies]
 wire.workspace = true
 storage.workspace = true
+logger.workspace = true
+simplelog.workspace = true
 tokio.workspace = true
 libc.workspace = true
 io-uring    = "0.7"
@@ -23,3 +25,5 @@ workspace = true
 
 [features]
 allocator_debug = []
+info-logs = ["logger/enable-info-logs"]
+debug-logs = ["logger/enable-debug-logs"]

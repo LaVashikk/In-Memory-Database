@@ -47,6 +47,20 @@ pub enum WalMsg {
 }
 
 fn main() -> anyhow::Result<()> {
+    let config = simplelog::ConfigBuilder::new()
+        .set_target_level(simplelog::LevelFilter::Info)
+        .set_thread_level(simplelog::LevelFilter::Info)
+        .build();
+
+    simplelog::TermLogger::init(
+        simplelog::LevelFilter::Debug,
+        config.clone(),
+        simplelog::TerminalMode::Mixed,
+        simplelog::ColorChoice::Auto,
+    ).unwrap_or_else(|_| {
+        simplelog::SimpleLogger::init(simplelog::LevelFilter::Debug, config).unwrap();
+    });
+
     let args = Args::parse();
 
     // recover state before opening listening port
@@ -95,7 +109,7 @@ fn main() -> anyhow::Result<()> {
             .context("failed to spawn stage-3")?;
     }
 
-    eprintln!("server starting: port={} mode={:?} dir={:?} start_lsn={}", args.port, args.mode, args.dir, start_lsn);
+    logger::info!("server starting: port={} mode={:?} dir={:?} start_lsn={}", args.port, args.mode, args.dir, start_lsn);
 
     // main thread is the 'stage 2' - main DB-worker!
     stage2::run_main_loop(item_rx, pool_rx, s23_tx, db, acker, start_lsn, args.dir);

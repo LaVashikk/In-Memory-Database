@@ -56,9 +56,18 @@ pub fn run_main_loop(
     let mut last_compact_lsn = start_lsn.saturating_sub(1);
 
     let mut recycled_batch: Option<Batch> = None;
+    // todo: pin core
 
     loop {
-        let Some(mut batch) = recycled_batch.take().or_else(|| free_rx.recv().ok()) else {
+        let Some(mut batch) = recycled_batch.take().or_else(|| {
+            match free_rx.try_recv() {
+                Ok(batch) => Some(batch),
+                Err(_) => {
+                    logger::warn!("THERE'S NO FREE BATCHES!!");
+                    free_rx.recv().ok()
+                },
+            }
+        }) else {
             break;
         };
 
@@ -68,10 +77,16 @@ pub fn run_main_loop(
         }
 
         apply_batch(&mut db, &mut batch, &mut lsn);
+        logger::debug!(
+            "Applied batch to DB: lsn_low={}, lsn_hi={}, items_count={}",
+            batch.lsn_low,
+            batch.lsn_hi,
+            batch.items.len()
+        );
 
         // The batch is applied to the in-memory state: every request now holds
         // its response, so the `Applied` guarantee level is reached
-        ack.advance(&mut batch, AckPoint::Applied);
+        ack.advance(&mut batch, AckPoint::Applied); // todo: 18% expensive
 
         if batch.has_wal_work() {
             s23_tx.send( WalMsg::Write(batch) ).expect("broken stage 2->3 channel");
@@ -88,12 +103,12 @@ pub fn run_main_loop(
             // let res = snapshotter.try_begin(&db, durable_lsn);
 
             // Todo
-            if let Ok(res) = snapshotter.write_snapshot_sync_TEMP_FUNC(&db, &dir, durable_lsn) && res {
-                let _ = s23_tx.send(WalMsg::Rotate { boundary_lsn: durable_lsn });
-                let _ = s23_tx.send(WalMsg::Retire { boundary_lsn: durable_lsn-1 });
-                last_compact_lsn = lsn;
-                eprintln!("stage2: snap done @lsn={durable_lsn} keys={}", db.len());
-            }
+            // if let Ok(res) = snapshotter.write_snapshot_sync_TEMP_FUNC(&db, &dir, durable_lsn) && res {
+            //     let _ = s23_tx.send(WalMsg::Rotate { boundary_lsn: durable_lsn });
+            //     let _ = s23_tx.send(WalMsg::Retire { boundary_lsn: durable_lsn-1 });
+            //     last_compact_lsn = lsn;
+            //     logger::info!("stage2: snap done @lsn={durable_lsn} keys={}", db.len());
+            // }
         }
     }
 }

@@ -12,7 +12,7 @@ pub async fn start_server(port: u16, item_tx: tokio::sync::mpsc::Sender<Request>
     tokio::spawn(async {
         let mut last = super::alloc_stat::snapshot();
         loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let now = super::alloc_stat::snapshot();
             eprintln!(
                 "[alloc stats 2s] allocs +{:<9} reallocs +{:<5} frees +{:<9} live {:<8}",
@@ -27,19 +27,20 @@ pub async fn start_server(port: u16, item_tx: tokio::sync::mpsc::Sender<Request>
 
     let listener = TcpListener::bind(("0.0.0.0", port)).await.expect("cannot bind TCP to this port");
     loop {
-        let Ok((sock, _)) = listener.accept().await else {
+        let Ok((sock, addr)) = listener.accept().await else {
             continue  // todo: better handle it
         };
 
+        logger::debug!("Accepted TCP connection from {:?}", addr);
         let _ = sock.set_nodelay(true);
         tokio::spawn(
-            handle_conn(sock, item_tx.clone())
+            handle_conn(sock, addr, item_tx.clone())
         );
     }
 }
 
 // network ingress (tokio)
-pub async fn handle_conn(sock: tokio::net::TcpStream, item_tx: async_mpsc::Sender<Request>) {
+pub async fn handle_conn(sock: tokio::net::TcpStream, _addr: std::net::SocketAddr, item_tx: async_mpsc::Sender<Request>) {
     let (rd, mut wr) = sock.into_split();
     let mut reader = BufReader::with_capacity(64 * 1024, rd);
     let (resp_tx, mut resp_rx) = async_mpsc::channel::<Resp>(RESP_BOUND);
@@ -91,6 +92,7 @@ pub async fn handle_conn(sock: tokio::net::TcpStream, item_tx: async_mpsc::Sende
             break;
         }
     }
+    logger::debug!("TCP connection closed for {:?}", _addr);
 }
 
 #[inline]

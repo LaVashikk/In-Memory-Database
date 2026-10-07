@@ -48,7 +48,7 @@ pub fn recover(dir: &Path) -> std::io::Result<(Db, u64)> {
         }
     }
 
-    eprintln!(
+    logger::warn!(
         "recover: loaded snap lsn={snap_lsn}, replayed={replayed} keys={} next_lsn={}{}",
         db.len(),
         highest + 1,

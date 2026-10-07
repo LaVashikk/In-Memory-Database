@@ -25,7 +25,7 @@ pub enum Outcome {
 
 pub fn load(bytes: &[u8], db: &mut Db) -> Option<u64> {
     if bytes.len() < 20 || rd_u32(&bytes[0..4]) as u32 != SNAPSHOT_MAGIC {
-        eprintln!("Snapshot file is invalid!");
+        logger::warn!("Snapshot file is invalid!");
         return None;
     }
 
@@ -50,12 +50,6 @@ pub fn load(bytes: &[u8], db: &mut Db) -> Option<u64> {
         p += val_len;
 
         db.insert_raw(key, val);
-
-        // OUTDATED CODE:
-        // let key_len = rd_u32(&bytes[p..p + 4]);
-        // let key = &bytes[p+4 .. p+4+key_len];
-        // let val_len = rd_u32(&bytes[p+4+key_len .. p+4+key_len+4]);
-        // let val = &bytes[p+4+key_len+4 .. p+4+key_len+4+val_len];
     }
 
     Some(lsn)
@@ -76,6 +70,7 @@ impl Snapshotter {
             return Ok(false)
         }
 
+        logger::info!("Starting sync snapshot write at lsn={}, keys={}", lsn, db.len());
         let tmp = dir.join("snapshot.tmp");
         {
             let f = fs::File::create(&tmp)?;
@@ -104,6 +99,7 @@ impl Snapshotter {
         }
 
         self.last_boundary_lsn = lsn;
+        logger::info!("Snapshot write completed successfully at lsn={}", lsn);
 
         Ok(true)
     }

@@ -33,6 +33,8 @@ impl Db {
             Some(slot) => {
                 if slot.len() == v.len() && let Some(buf) = Arc::get_mut(slot) {
                     buf.copy_from_slice(v);
+                } else {
+                    *slot = Arc::from(v);
                 }
             },
             None => { self.map.insert(k.into(), Arc::from(v)); } ,

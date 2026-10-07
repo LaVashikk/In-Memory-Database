@@ -44,7 +44,7 @@ pub struct WalEngine {
     /// Buffers go back to the pool once nobody owes their clients anything
     recycle_tx: sync_mpsc::Sender<Batch>,
 
-    // --- TODO how to name? ---
+    // --- durability accounting ---
    	/// Watermark: last LSN encoded into the WAL
     last_ingested_lsn: LSN,
     /// Current opened wal-file
@@ -121,7 +121,6 @@ impl WalEngine {
                 self.pending.push_back(
                     IoWork::Fsync(self.last_ingested_lsn)
                 );
-                self.seg.mark_fsynced();
             }
 
             let is_need_submit = self.handle_pending();
@@ -185,10 +184,18 @@ impl WalEngine {
         let (offset, _) = self.seg.advance_offset(batch_size);
         self.fsync_planner.on_write_queued(batch_size);
 
+        logger::debug!(
+            "queueing WAL write: lsn_low={}, lsn_hi={}, size={} bytes, offset={}",
+            batch.lsn_low,
+            batch.lsn_hi,
+            batch_size,
+            offset
+        );
         self.pending.push_back(IoWork::write(batch, offset));
     }
 
     fn rotate(&mut self, boundary_lsn: u64) {
+        logger::info!("rotating WAL segment to boundary_lsn={}", boundary_lsn);
         // todo: okay... I can't drop the current segment because writing to it might still be ongoing
         // soooo...I'll just sync-wait until all the recordings are finished :)
         //
@@ -217,8 +224,11 @@ impl WalEngine {
     }
 
     fn retire(&mut self, boundary_lsn: u64) {
+        logger::info!("retiring WAL segments older than boundary_lsn={}", boundary_lsn);
         if self.seg.start_lsn() < boundary_lsn {
-            panic!("Segment starts after the boundary LSN. This is a bug, report to programmer")
+            panic!("retire would unlink the ACTIVE segment (start_lsn {} < boundary {})",
+                self.seg.start_lsn(), boundary_lsn
+            )
         }
 
         // todo: add rotation rules and use here
@@ -279,6 +289,11 @@ impl WalEngine {
             match work.complete(result) {
                 Verdict::Ok(maybe_batch) => {
                     if let Some(mut batch) = maybe_batch {
+                        logger::debug!(
+                            "WAL write completed: lsn_low={}, lsn_hi={}",
+                            batch.lsn_low,
+                            batch.lsn_hi
+                        );
                         self.ack.advance(&mut batch, AckPoint::Written);
 
                         if self.ack.is_settled(&batch) {
@@ -300,6 +315,7 @@ impl WalEngine {
                 },
 
                 Verdict::Durable => {
+                    logger::debug!("WAL fsync completed, durable up to lsn={}", self.last_ingested_lsn);
                     for mut batch in self.awaiting_fsync.drain(..) {
                         self.ack.advance(&mut batch, AckPoint::Durable);
                         batch.recycle();

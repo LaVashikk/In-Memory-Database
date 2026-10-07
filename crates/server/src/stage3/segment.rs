@@ -6,7 +6,6 @@ pub struct Segment {
     _file: std::fs::File, // keep open for RAII
     fd: types::Fd,
     offset: u64,
-    fsync_offset: u64,
     start_lsn: u64,
 }
 impl Segment {
@@ -23,7 +22,6 @@ impl Segment {
         Ok(Segment {
             _file: file,
             offset: bytes,
-            fsync_offset: bytes,
             fd,
             start_lsn,
         })
@@ -46,9 +44,5 @@ impl Segment {
         let o = self.offset;
         self.offset += bytes_size;
         (o, o + bytes_size)
-    }
-
-    pub fn mark_fsynced(&mut self) {
-        self.fsync_offset = self.offset;
     }
 }

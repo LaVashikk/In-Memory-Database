@@ -4,7 +4,8 @@ members = [
     "crates/wire",
     "crates/storage",
     "crates/server",
-    "crates/smart_client"
+    "crates/smart_client",
+    "crates/logger"
 ]
 default-members = ["crates/server"]
 
@@ -19,14 +20,16 @@ version = "1.0.0"
 [workspace.dependencies]
 wire    = { path = "crates/wire" }
 storage = { path = "crates/storage" }
+logger  = { path = "crates/logger" }
 log     = "0.4"
+simplelog = "0.12"
 anyhow  = "1.0"
 tokio   = { version = "1", features = ["full"] }
 libc    = "0.2"
 
 [profile.release]
 opt-level     = 3
-lto           = "thin"
+lto           = "fat"
 codegen-units = 1
 panic         = "abort"
 debug = "line-tables-only"
